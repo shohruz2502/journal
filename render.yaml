@@ -3,12 +3,19 @@ services:
     name: smart-journal
     env: node
     plan: free
-    buildCommand: npm install
+    buildCommand: |
+      npm install
+      pip install -r requirements.txt
+      python import_students.py
     startCommand: npm start
     envVars:
       - key: NODE_ENV
         value: production
       - key: POSTGRES_URL
+        fromDatabase:
+          name: smart-journal-db
+          property: connectionString
+      - key: DATABASE_URL
         fromDatabase:
           name: smart-journal-db
           property: connectionString
