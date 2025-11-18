@@ -6,6 +6,9 @@ const { Pool } = require('pg');
 const path = require('path');
 const http = require('http');
 const socketIo = require('socket.io');
+const mammoth = require('mammoth');
+const multer = require('multer');
+const fs = require('fs');
 
 const app = express();
 const server = http.createServer(app);
@@ -24,8 +27,41 @@ const pool = new Pool({
 
 // Middleware
 app.use(cors());
-app.use(bodyParser.json());
+app.use(bodyParser.json({ limit: '50mb' }));
+app.use(bodyParser.urlencoded({ extended: true, limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Настройка multer для загрузки файлов
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    const uploadDir = path.join(__dirname, 'uploads');
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+    }
+    cb(null, uploadDir);
+  },
+  filename: function (req, file, cb) {
+    cb(null, 'students-' + Date.now() + '.docx');
+  }
+});
+
+const upload = multer({ 
+  storage: storage,
+  fileFilter: function (req, file, cb) {
+    if (file.mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || 
+        file.mimetype === 'application/msword') {
+      cb(null, true);
+    } else {
+      cb(new Error('Только Word документы разрешены'), false);
+    }
+  },
+  limits: {
+    fileSize: 10 * 1024 * 1024 // 10MB
+  }
+});
+
+// Флаг для отслеживания импорта студентов
+let studentsImported = false;
 
 // Инициализация базы данных
 async function initializeDatabase() {
@@ -82,6 +118,15 @@ async function initializeDatabase() {
       )
     `);
 
+    // Таблица для отслеживания импорта
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS import_status (
+        id SERIAL PRIMARY KEY,
+        imported BOOLEAN DEFAULT FALSE,
+        imported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
     // Создаем индексы для производительности
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_attendance_date ON attendance(date)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_attendance_student_date ON attendance(student_id, date)`);
@@ -89,6 +134,12 @@ async function initializeDatabase() {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_students_group ON students(group_name)`);
 
     console.log('✅ Таблицы базы данных инициализированы');
+
+    // Проверяем статус импорта
+    const importStatus = await pool.query('SELECT * FROM import_status ORDER BY id DESC LIMIT 1');
+    if (importStatus.rows.length > 0) {
+      studentsImported = importStatus.rows[0].imported;
+    }
 
     // Создаем тестовых пользователей если их нет
     const usersResult = await pool.query('SELECT COUNT(*) FROM users');
@@ -107,9 +158,9 @@ async function initializeDatabase() {
       console.log('✅ Тестовые пользователи созданы');
     }
 
-    // Создаем тестовых студентов если их нет
+    // Создаем тестовых студентов если импорт еще не выполнялся
     const studentsResult = await pool.query('SELECT COUNT(*) FROM students');
-    if (parseInt(studentsResult.rows[0].count) === 0) {
+    if (parseInt(studentsResult.rows[0].count) === 0 && !studentsImported) {
       const testStudents = [
         { name: 'Алишер Усманов', group: '1-260101-00-a', course: 1 },
         { name: 'Фарход Рахимов', group: '1-260101-00-a', course: 1 },
@@ -129,6 +180,223 @@ async function initializeDatabase() {
 
   } catch (error) {
     console.error('❌ Ошибка инициализации базы данных:', error);
+  }
+}
+
+// Функция для парсинга Word документа
+async function parseStudentsFromWord(filePath) {
+  try {
+    console.log('📖 Чтение Word документа:', filePath);
+    
+    const result = await mammoth.extractRawText({ path: filePath });
+    const text = result.value;
+    
+    console.log('📄 Текст документа получен, длина:', text.length);
+    
+    // Разбиваем текст на строки и фильтруем пустые
+    const lines = text.split('\n')
+      .map(line => line.trim())
+      .filter(line => line.length > 0);
+    
+    console.log('📊 Найдено строк:', lines.length);
+    
+    const students = [];
+    let currentGroup = '';
+    let currentCourse = 1;
+    
+    // Регулярные выражения для поиска групп и студентов
+    const groupRegex = /Курси\s+(\d+).*?ихтисоси\s+([^--]+)--?\s*([^]+?)(?=Курси|$)/gi;
+    const studentRegex = /^\d+\.\s+(.+?)(?=\s*\d+\.\s+|$)/gm;
+    
+    // Обрабатываем весь текст
+    let match;
+    const textContent = lines.join('\n');
+    
+    while ((match = groupRegex.exec(textContent)) !== null) {
+      const course = parseInt(match[1]);
+      const groupCode = match[2].trim();
+      const groupContent = match[3];
+      
+      console.log(`🎯 Найдена группа: курс ${course}, код: ${groupCode}`);
+      
+      // Извлекаем студентов из содержимого группы
+      let studentMatch;
+      const studentLines = groupContent.split('\n')
+        .map(line => line.trim())
+        .filter(line => line.length > 2 && !line.includes('№') && !line.includes('Ном ва насаби') && !line.includes('донишҷӯ'));
+      
+      studentLines.forEach(line => {
+        // Ищем номер и имя студента
+        const studentMatch = line.match(/^\d+\.\s+(.+?)(?:\s*$|\s*№)/);
+        if (studentMatch) {
+          const studentName = studentMatch[1].trim();
+          
+          // Очищаем имя от лишних символов
+          const cleanName = studentName
+            .replace(/\*\*/g, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+          
+          if (cleanName.length > 3 && !cleanName.includes('хориҷ') && !cleanName.includes('нест') && !cleanName.includes('фосилавӣ')) {
+            students.push({
+              name: cleanName,
+              group: groupCode,
+              course: course
+            });
+            console.log(`👤 Добавлен студент: ${cleanName} (${groupCode})`);
+          }
+        }
+      });
+    }
+    
+    console.log(`✅ Всего извлечено студентов: ${students.length}`);
+    
+    // Если регулярные выражения не сработали, используем альтернативный метод
+    if (students.length === 0) {
+      console.log('🔄 Используем альтернативный метод парсинга...');
+      return parseStudentsAlternative(textContent);
+    }
+    
+    return students;
+    
+  } catch (error) {
+    console.error('❌ Ошибка парсинга Word документа:', error);
+    throw error;
+  }
+}
+
+// Альтернативный метод парсинга
+function parseStudentsAlternative(text) {
+  const students = [];
+  const lines = text.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+  
+  let currentGroup = '';
+  let currentCourse = 1;
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    
+    // Ищем заголовок группы
+    if (line.includes('Курси') && line.includes('ихтисоси')) {
+      const courseMatch = line.match(/Курси\s+(\d+)/);
+      if (courseMatch) {
+        currentCourse = parseInt(courseMatch[1]);
+      }
+      
+      // Извлекаем код группы
+      const groupMatch = line.match(/ихтисоси\s+([^-]+)/);
+      if (groupMatch) {
+        currentGroup = groupMatch[1].trim();
+        console.log(`🎯 Найдена группа: ${currentGroup}, курс: ${currentCourse}`);
+      }
+      continue;
+    }
+    
+    // Ищем студентов (номера 1., 2., и т.д.)
+    if (currentGroup && /^\d+\.\s+[А-Яа-яЁёA-Za-z]/.test(line)) {
+      const studentMatch = line.match(/^\d+\.\s+(.+)/);
+      if (studentMatch) {
+        let studentName = studentMatch[1].trim();
+        
+        // Очищаем имя
+        studentName = studentName
+          .replace(/\*\*/g, '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        
+        // Пропускаем исключенных студентов
+        if (!studentName.includes('хориҷ') && 
+            !studentName.includes('нест') && 
+            !studentName.includes('фосилавӣ') &&
+            !studentName.includes('Дигар ихтис') &&
+            !studentName.includes('Хиз-и ҳарбӣ') &&
+            !studentName.includes('перевод') &&
+            studentName.length > 5) {
+          
+          students.push({
+            name: studentName,
+            group: currentGroup,
+            course: currentCourse
+          });
+        }
+      }
+    }
+  }
+  
+  console.log(`✅ Альтернативным методом извлечено студентов: ${students.length}`);
+  return students;
+}
+
+// Функция импорта студентов из Word документа
+async function importStudentsFromWord(filePath) {
+  try {
+    if (studentsImported) {
+      console.log('ℹ️ Импорт студентов уже выполнен, пропускаем');
+      return { success: true, imported: 0, message: 'Импорт уже выполнен ранее' };
+    }
+    
+    console.log('🚀 Начало импорта студентов из Word документа...');
+    
+    const students = await parseStudentsFromWord(filePath);
+    
+    if (students.length === 0) {
+      throw new Error('Не удалось извлечь студентов из документа');
+    }
+    
+    console.log(`📊 Найдено студентов для импорта: ${students.length}`);
+    
+    const client = await pool.connect();
+    let importedCount = 0;
+    
+    try {
+      await client.query('BEGIN');
+      
+      // Очищаем существующих студентов (если нужно)
+      await client.query('DELETE FROM students');
+      
+      // Добавляем всех студентов
+      for (const student of students) {
+        try {
+          await client.query(
+            'INSERT INTO students (name, group_name, course) VALUES ($1, $2, $3)',
+            [student.name, student.group, student.course]
+          );
+          importedCount++;
+        } catch (error) {
+          console.error(`Ошибка при добавлении студента ${student.name}:`, error);
+        }
+      }
+      
+      // Отмечаем импорт как выполненный
+      await client.query('INSERT INTO import_status (imported) VALUES (true)');
+      
+      await client.query('COMMIT');
+      
+      studentsImported = true;
+      
+      console.log(`✅ Успешно импортировано студентов: ${importedCount}`);
+      
+      return { 
+        success: true, 
+        imported: importedCount, 
+        total: students.length,
+        message: `Успешно импортировано ${importedCount} из ${students.length} студентов` 
+      };
+      
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+    
+  } catch (error) {
+    console.error('❌ Ошибка импорта студентов:', error);
+    return { 
+      success: false, 
+      imported: 0, 
+      message: `Ошибка импорта: ${error.message}` 
+    };
   }
 }
 
@@ -177,13 +445,66 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
+// Импорт студентов из Word документа
+app.post('/api/import-students', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        error: 'Файл не загружен'
+      });
+    }
+
+    const result = await importStudentsFromWord(req.file.path);
+    
+    // Удаляем временный файл
+    try {
+      fs.unlinkSync(req.file.path);
+    } catch (error) {
+      console.error('Ошибка удаления временного файла:', error);
+    }
+    
+    if (result.success) {
+      // Уведомляем всех клиентов о новых студентах
+      io.emit('students_imported', { count: result.imported });
+      
+      res.json(result);
+    } else {
+      res.status(500).json(result);
+    }
+    
+  } catch (error) {
+    console.error('Import error:', error);
+    res.status(500).json({
+      success: false,
+      error: `Ошибка импорта: ${error.message}`
+    });
+  }
+});
+
+// Проверка статуса импорта
+app.get('/api/import-status', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM import_status ORDER BY id DESC LIMIT 1');
+    const status = result.rows.length > 0 ? result.rows[0] : { imported: false };
+    
+    res.json({
+      imported: status.imported,
+      imported_at: status.imported_at
+    });
+  } catch (error) {
+    console.error('Import status error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Получение списка студентов
 app.get('/api/students', async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT id, name, group_name as group, course, created_at 
       FROM students 
-      ORDER BY name ASC
+      ORDER BY group_name, name ASC
     `);
     
     res.json(result.rows);
@@ -636,7 +957,8 @@ app.get('/api/health', async (req, res) => {
       status: 'OK', 
       timestamp: new Date().toISOString(),
       database: 'Connected',
-      environment: process.env.NODE_ENV || 'development'
+      environment: process.env.NODE_ENV || 'development',
+      students_imported: studentsImported
     });
   } catch (error) {
     res.status(500).json({ 
@@ -694,6 +1016,7 @@ async function startServer() {
       console.log('🔗 Health check: /api/health');
       console.log('⏰ Почасовой учет посещаемости активирован');
       console.log('🔌 WebSocket server ready');
+      console.log(`📚 Импорт студентов: ${studentsImported ? 'УЖЕ ВЫПОЛНЕН' : 'ОЖИДАЕТСЯ'}`);
     });
   } catch (error) {
     console.error('❌ Failed to start server:', error);
