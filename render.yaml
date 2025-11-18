@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: smart-journal
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: POSTGRES_URL
+        fromDatabase:
+          name: smart-journal-db
+          property: connectionString
