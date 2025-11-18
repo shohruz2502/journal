@@ -6,8 +6,12 @@ services:
     buildCommand: |
       npm install
       pip install -r requirements.txt
+    startCommand: |
+      node server.js &
+      SERVER_PID=$!
+      sleep 15
       python import_students.py
-    startCommand: npm start
+      wait $SERVER_PID
     envVars:
       - key: NODE_ENV
         value: production
