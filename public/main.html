@@ -1076,6 +1076,69 @@
     cursor: not-allowed;
 }
 
+/* Причины пропусков в карточке студента */
+.absence-reason-controls {
+    display: flex;
+    gap: 10px;
+    margin-top: 15px;
+    justify-content: center;
+}
+
+.absence-reason-btn {
+    flex: 1;
+    padding: 10px 12px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    transition: all 0.3s ease;
+}
+
+.absence-reason-btn.valid {
+    background: var(--success);
+    color: white;
+}
+
+.absence-reason-btn.invalid {
+    background: var(--danger);
+    color: white;
+}
+
+.absence-reason-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.absence-reason-btn:not(:disabled):hover {
+    transform: translateY(-2px);
+    box-shadow: 0 3px 8px rgba(0,0,0,0.15);
+}
+
+.absence-reason-indicator {
+    font-size: 11px;
+    margin-top: 8px;
+    text-align: center;
+    font-weight: 600;
+    padding: 4px 8px;
+    border-radius: 4px;
+}
+
+.absence-reason-indicator.valid {
+    background: rgba(39, 174, 96, 0.15);
+    color: var(--success);
+}
+
+.absence-reason-indicator.invalid {
+    background: rgba(231, 76, 60, 0.15);
+    color: var(--danger);
+}
+
+.absence-reason-indicator.none {
+    background: rgba(127, 140, 141, 0.15);
+    color: var(--gray);
+}
+
     </style>
 </head>
 <body>
@@ -1981,6 +2044,32 @@
                 
                 const professionName = professions.find(p => p.id === student.group)?.name || student.group;
                 
+                // Получаем информацию о причинах пропусков для этого студента
+                const dailyReasons = absenceReasons[dateStr] && absenceReasons[dateStr][student.id] ? 
+                    absenceReasons[dateStr][student.id] : {};
+                
+                // Определяем общую причину пропуска (если все пропуски имеют одинаковую причину)
+                let overallReason = 'none';
+                const reasonValues = Object.values(dailyReasons);
+                if (reasonValues.length > 0) {
+                    const allSameReason = reasonValues.every(val => val === reasonValues[0]);
+                    if (allSameReason) {
+                        overallReason = reasonValues[0];
+                    }
+                }
+                
+                const reasonText = {
+                    'valid': 'Уважительная причина',
+                    'invalid': 'Неуважительная причина',
+                    'none': 'Причина не указана'
+                };
+                
+                const reasonClass = {
+                    'valid': 'valid',
+                    'invalid': 'invalid',
+                    'none': 'none'
+                };
+                
                 studentCard.innerHTML = `
                     <div class="student-header">
                         <div>
@@ -1993,6 +2082,21 @@
                     </div>
                     <div class="hourly-controls">
                         ${generateHourlyControls(student.id, hourlyData, canEdit)}
+                    </div>
+                    <div class="absence-reason-controls">
+                        <button class="absence-reason-btn valid" 
+                                data-student="${student.id}"
+                                ${!canEdit || absentHours === 0 ? 'disabled' : ''}>
+                            Уважительная
+                        </button>
+                        <button class="absence-reason-btn invalid" 
+                                data-student="${student.id}"
+                                ${!canEdit || absentHours === 0 ? 'disabled' : ''}>
+                            Неуважительная
+                        </button>
+                    </div>
+                    <div class="absence-reason-indicator ${reasonClass[overallReason]}">
+                        ${reasonText[overallReason]}
                     </div>
                     <div class="quick-actions">
                         <div class="quick-actions-title">Быстрая отметка:</div>
@@ -2039,6 +2143,53 @@
                     renderWeeklyTable();
                     renderAbsenceTable();
                     updateBlacklist();
+                });
+            });
+            
+            // Обработчики для кнопок причин пропусков
+            document.querySelectorAll('.absence-reason-btn.valid').forEach(button => {
+                button.addEventListener('click', async function() {
+                    if (this.disabled) return;
+                    
+                    const studentId = parseInt(this.getAttribute('data-student'));
+                    const dateStr = formatDate(selectedDate);
+                    
+                    // Устанавливаем уважительную причину для всех часов отсутствия
+                    const hourlyData = hourlyAttendance[dateStr] && hourlyAttendance[dateStr][studentId] ? 
+                        hourlyAttendance[dateStr][studentId] : {};
+                    
+                    for (let hour = 1; hour <= HOURS_PER_DAY; hour++) {
+                        if (hourlyData[hour] === 'absent') {
+                            await saveAbsenceReason(studentId, dateStr, hour, 'valid');
+                        }
+                    }
+                    
+                    renderStudentsGrid();
+                    renderAbsenceTable();
+                    showNotification('Установлена уважительная причина для всех пропусков', 'success');
+                });
+            });
+
+            document.querySelectorAll('.absence-reason-btn.invalid').forEach(button => {
+                button.addEventListener('click', async function() {
+                    if (this.disabled) return;
+                    
+                    const studentId = parseInt(this.getAttribute('data-student'));
+                    const dateStr = formatDate(selectedDate);
+                    
+                    // Устанавливаем неуважительную причину для всех часов отсутствия
+                    const hourlyData = hourlyAttendance[dateStr] && hourlyAttendance[dateStr][studentId] ? 
+                        hourlyAttendance[dateStr][studentId] : {};
+                    
+                    for (let hour = 1; hour <= HOURS_PER_DAY; hour++) {
+                        if (hourlyData[hour] === 'absent') {
+                            await saveAbsenceReason(studentId, dateStr, hour, 'invalid');
+                        }
+                    }
+                    
+                    renderStudentsGrid();
+                    renderAbsenceTable();
+                    showNotification('Установлена неуважительная причина для всех пропусков', 'success');
                 });
             });
             
