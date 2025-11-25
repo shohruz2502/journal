@@ -118,7 +118,7 @@ async function initializeDatabase() {
       )
     `);
 
-    // Таблица причин пропусков
+    // Таблица для причин пропусков
     await pool.query(`
       CREATE TABLE IF NOT EXISTS absence_reasons (
         id SERIAL PRIMARY KEY,
@@ -824,6 +824,101 @@ app.post('/api/attendance', async (req, res) => {
   }
 });
 
+// Получение причин пропусков
+app.get('/api/absence-reasons', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT student_id, date, hour, reason 
+      FROM absence_reasons 
+      ORDER BY date DESC, student_id, hour
+    `);
+    
+    const reasonsData = {};
+    result.rows.forEach(row => {
+      if (!reasonsData[row.date]) reasonsData[row.date] = {};
+      if (!reasonsData[row.date][row.student_id]) reasonsData[row.date][row.student_id] = {};
+      reasonsData[row.date][row.student_id][row.hour] = row.reason;
+    });
+    
+    res.json(reasonsData);
+  } catch (error) {
+    console.error('Error getting absence reasons:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Сохранение причины пропуска
+app.post('/api/absence-reasons', async (req, res) => {
+  try {
+    const { studentId, date, hour, reason } = req.body;
+    
+    if (!studentId || !date || hour === undefined) {
+      return res.status(400).json({ 
+        error: 'Обязательные поля: studentId, date, hour' 
+      });
+    }
+    
+    if (reason === null) {
+      await pool.query(
+        'DELETE FROM absence_reasons WHERE student_id = $1 AND date = $2 AND hour = $3',
+        [studentId, date, hour]
+      );
+    } else {
+      await pool.query(
+        `INSERT INTO absence_reasons (student_id, date, hour, reason) 
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (student_id, date, hour) 
+         DO UPDATE SET reason = $4, created_at = CURRENT_TIMESTAMP`,
+        [studentId, date, hour, reason]
+      );
+    }
+    
+    const reasonData = { studentId, date, hour, reason };
+    res.json({ success: true, ...reasonData });
+    
+    io.emit('absence_reason_updated', reasonData);
+    
+  } catch (error) {
+    console.error('Error saving absence reason:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Получение черного списка
+app.get('/api/blacklist', async (req, res) => {
+  try {
+    const { group } = req.query;
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    const startDate = thirtyDaysAgo.toISOString().split('T')[0];
+    
+    let query = `
+      SELECT 
+        s.id,
+        s.name,
+        s.group_name,
+        COUNT(CASE WHEN a.status = 'absent' THEN 1 END) as absence_hours
+      FROM students s
+      LEFT JOIN attendance a ON s.id = a.student_id AND a.date >= $1
+      ${group ? 'WHERE s.group_name = $2' : ''}
+      GROUP BY s.id, s.name, s.group_name
+      HAVING COUNT(CASE WHEN a.status = 'absent' THEN 1 END) >= $${group ? 3 : 2}
+      ORDER BY absence_hours DESC
+    `;
+    
+    const params = [startDate];
+    if (group) params.push(group);
+    params.push(36); // Порог предупреждения
+    
+    const result = await pool.query(query, params);
+    
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error getting blacklist:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Сохранение и блокировка дня
 app.post('/api/save-day', async (req, res) => {
   try {
@@ -880,90 +975,6 @@ app.get('/api/saved-days', async (req, res) => {
     res.json(savedDays);
   } catch (error) {
     console.error('Error getting saved days:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Получение причин пропусков
-app.get('/api/absence-reasons', async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT student_id, date, hour, reason 
-      FROM absence_reasons 
-      ORDER BY date DESC, student_id, hour
-    `);
-    
-    // Преобразуем в формат для фронтенда
-    const reasonsData = {};
-    
-    result.rows.forEach(row => {
-      const { student_id, date, hour, reason } = row;
-      
-      if (!reasonsData[date]) {
-        reasonsData[date] = {};
-      }
-      if (!reasonsData[date][student_id]) {
-        reasonsData[date][student_id] = {};
-      }
-      
-      reasonsData[date][student_id][hour] = reason;
-    });
-    
-    res.json(reasonsData);
-  } catch (error) {
-    console.error('Error getting absence reasons:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Сохранение причины пропуска
-app.post('/api/absence-reasons', async (req, res) => {
-  try {
-    const { studentId, date, hour, reason } = req.body;
-    
-    if (!studentId || !date || !hour) {
-      return res.status(400).json({ 
-        error: 'Обязательные поля: studentId, date, hour' 
-      });
-    }
-    
-    // Проверяем существование студента
-    const studentResult = await pool.query('SELECT * FROM students WHERE id = $1', [studentId]);
-    if (studentResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Студент не найден' });
-    }
-    
-    if (!reason || reason === 'null') {
-      // Удаляем запись если причина не указана
-      await pool.query(
-        'DELETE FROM absence_reasons WHERE student_id = $1 AND date = $2 AND hour = $3',
-        [studentId, date, hour]
-      );
-    } else {
-      // Вставляем или обновляем запись
-      await pool.query(
-        `INSERT INTO absence_reasons (student_id, date, hour, reason) 
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (student_id, date, hour) 
-         DO UPDATE SET reason = $4, created_at = CURRENT_TIMESTAMP`,
-        [studentId, date, hour, reason]
-      );
-    }
-    
-    const reasonData = {
-      studentId: parseInt(studentId),
-      date: date,
-      hour: parseInt(hour),
-      reason: reason
-    };
-    
-    res.json({ success: true, ...reasonData });
-    
-    // Уведомляем всех клиентов через WebSocket
-    io.emit('absence_reason_updated', reasonData);
-    
-  } catch (error) {
-    console.error('Error saving absence reason:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1051,89 +1062,6 @@ app.get('/api/stats/daily/:date', async (req, res) => {
   }
 });
 
-// Статистика черного списка
-app.get('/api/blacklist-stats', async (req, res) => {
-  try {
-    const { group } = req.query;
-    
-    // Рассчитываем дату 30 дней назад
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    const startDate = thirtyDaysAgo.toISOString().split('T')[0];
-    const endDate = new Date().toISOString().split('T')[0];
-    
-    let query = `
-      SELECT 
-        s.id as student_id,
-        s.name,
-        s.group_name,
-        COUNT(CASE WHEN a.status = 'absent' THEN 1 END) as absent_hours
-      FROM students s
-      LEFT JOIN attendance a ON s.id = a.student_id 
-        AND a.date BETWEEN $1 AND $2
-    `;
-    
-    const params = [startDate, endDate];
-    
-    if (group) {
-      query += ` WHERE s.group_name = $3`;
-      params.push(group);
-    }
-    
-    query += ` GROUP BY s.id, s.name, s.group_name ORDER BY absent_hours DESC`;
-    
-    const result = await pool.query(query, params);
-    
-    const BLACKLIST_THRESHOLD = 48;
-    const WARNING_THRESHOLD = 36;
-    
-    let blacklistCount = 0;
-    let warningCount = 0;
-    let totalAbsenceHours = 0;
-    
-    const blacklistedStudents = [];
-    const warnedStudents = [];
-    
-    result.rows.forEach(row => {
-      totalAbsenceHours += parseInt(row.absent_hours) || 0;
-      
-      if (row.absent_hours >= BLACKLIST_THRESHOLD) {
-        blacklistCount++;
-        blacklistedStudents.push({
-          student: {
-            id: row.student_id,
-            name: row.name,
-            group: row.group_name
-          },
-          absenceHours: row.absent_hours
-        });
-      } else if (row.absent_hours >= WARNING_THRESHOLD) {
-        warningCount++;
-        warnedStudents.push({
-          student: {
-            id: row.student_id,
-            name: row.name,
-            group: row.group_name
-          },
-          absenceHours: row.absent_hours
-        });
-      }
-    });
-    
-    res.json({
-      blacklistCount,
-      warningCount,
-      totalAbsenceHours,
-      blacklistedStudents,
-      warnedStudents
-    });
-    
-  } catch (error) {
-    console.error('Error getting blacklist stats:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
 // Health check endpoint
 app.get('/api/health', async (req, res) => {
   try {
@@ -1202,6 +1130,7 @@ async function startServer() {
       console.log('⏰ Почасовой учет посещаемости активирован');
       console.log('🔌 WebSocket server ready');
       console.log(`📚 Импорт студентов: ${studentsImported ? 'УЖЕ ВЫПОЛНЕН' : 'ОЖИДАЕТСЯ'}`);
+      console.log('✅ Все необходимые API endpoints готовы');
     });
   } catch (error) {
     console.error('❌ Failed to start server:', error);
