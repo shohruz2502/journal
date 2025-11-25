@@ -1534,6 +1534,7 @@
         // WebSocket соединение
         const socket = io();
 
+
         // ===== ИНИЦИАЛИЗАЦИЯ ПРИЛОЖЕНИЯ =====
         document.addEventListener('DOMContentLoaded', function() {
             console.log('Initializing application...');
@@ -1579,11 +1580,11 @@
     generateCalendar();
     updateDateDisplay();
     updateWeekDisplay();
-    updateAbsenceWeekDisplay(); // Добавьте эту строку
+    updateAbsenceWeekDisplay();
     loadStudents();
     loadAttendance();
     loadSavedDays();
-    loadAbsenceReasons();
+    loadAbsenceReasons(); // ← ДОБАВЬТЕ ЭТУ СТРОЧКУ
 }
 
         function populateProfessionSelects() {
@@ -1733,6 +1734,19 @@
                 return false;
             }
         }
+        async function loadAbsenceReasons() {
+    try {
+        const response = await fetch(`${API_BASE}/absence-reasons`);
+        if (response.ok) {
+            absenceReasons = await response.json();
+        } else {
+            absenceReasons = {};
+        }
+    } catch (error) {
+        console.error('Error loading absence reasons:', error);
+        absenceReasons = {};
+    }
+}
 
         async function saveAbsenceReason(studentId, date, hour, reason) {
             try {
