@@ -1354,6 +1354,16 @@
             </div>
         </div>
 
+        <div id="absencePage" class="tab-content">
+    <!-- Добавьте этот блок навигации по неделям -->
+    <div class="week-report-header">
+        <div class="current-week" id="absenceCurrentWeekRange"></div>
+        <div class="week-nav">
+            <button class="btn" id="absencePrevWeek">◀ Предыдущая</button>
+            <button class="btn" id="absenceNextWeek">Следующая ▶</button>
+        </div>
+    </div>
+
         <!-- Blacklist Page -->
         <div id="blacklistPage" class="tab-content">
             <div class="group-selector">
@@ -1564,16 +1574,17 @@
         }
 
         function initializeApp() {
-            populateProfessionSelects();
-            calculateCurrentWeek();
-            generateCalendar();
-            updateDateDisplay();
-            updateWeekDisplay();
-            loadStudents();
-            loadAttendance();
-            loadSavedDays();
-            loadAbsenceReasons();
-        }
+    populateProfessionSelects();
+    calculateCurrentWeek();
+    generateCalendar();
+    updateDateDisplay();
+    updateWeekDisplay();
+    updateAbsenceWeekDisplay(); // Добавьте эту строку
+    loadStudents();
+    loadAttendance();
+    loadSavedDays();
+    loadAbsenceReasons();
+}
 
         function populateProfessionSelects() {
             const selects = [
@@ -1895,6 +1906,17 @@
                 return false;
             }
         }
+
+        function updateAbsenceWeekDisplay() {
+    const weekEnd = new Date(currentWeekStart);
+    weekEnd.setDate(currentWeekStart.getDate() + 5);
+    
+    const options = { day: 'numeric', month: 'long' };
+    const startStr = currentWeekStart.toLocaleDateString('ru-RU', options);
+    const endStr = weekEnd.toLocaleDateString('ru-RU', options);
+    
+    document.getElementById('absenceCurrentWeekRange').textContent = `${startStr} - ${endStr}`;
+}
 
         // ===== РЕНДЕРИНГ ИНТЕРФЕЙСА =====
         function generateCalendar() {
@@ -2754,6 +2776,10 @@
             // Навигация по неделям
             document.getElementById('prevWeek').addEventListener('click', () => navigateWeeks(-1));
             document.getElementById('nextWeek').addEventListener('click', () => navigateWeeks(1));
+
+            // Навигация по неделям на вкладке пропусков
+    document.getElementById('absencePrevWeek').addEventListener('click', () => navigateAbsenceWeeks(-1));
+    document.getElementById('absenceNextWeek').addEventListener('click', () => navigateAbsenceWeeks(1));
             
             // Переключение вкладок
             document.querySelectorAll('.tab').forEach(tab => {
@@ -2919,22 +2945,32 @@
             renderAbsenceTable();
         }
 
+        function navigateAbsenceWeeks(weeks) {
+    currentWeekStart.setDate(currentWeekStart.getDate() + (weeks * 7));
+    updateWeekDisplay();
+    updateAbsenceWeekDisplay(); // Обновляем отображение на вкладке пропусков
+    renderWeeklyTable();
+    renderAbsenceTable(); // Перерисовываем таблицу пропусков
+}
+
         function switchPage(page) {
-            document.querySelectorAll('.tab-content').forEach(content => {
-                content.classList.remove('active');
-            });
-            
-            document.querySelectorAll('.tab').forEach(tab => {
-                tab.classList.remove('active');
-            });
-            
-            document.getElementById(page + 'Page').classList.add('active');
-            document.querySelector(`.tab[data-page="${page}"]`).classList.add('active');
-            
-            if (page === 'blacklist') {
-                updateBlacklist();
-            }
-        }
+    document.querySelectorAll('.tab-content').forEach(content => {
+        content.classList.remove('active');
+    });
+    
+    document.querySelectorAll('.tab').forEach(tab => {
+        tab.classList.remove('active');
+    });
+    
+    document.getElementById(page + 'Page').classList.add('active');
+    document.querySelector(`.tab[data-page="${page}"]`).classList.add('active');
+    
+    if (page === 'blacklist') {
+        updateBlacklist();
+    } else if (page === 'absence') {
+        updateAbsenceWeekDisplay(); // Обновляем отображение недели при переключении на вкладку
+    }
+}
 
         function selectDate(date) {
             selectedDate = date;
